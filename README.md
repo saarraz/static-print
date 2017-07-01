@@ -46,7 +46,7 @@ Compiling the above program prints out (at compile time):
 <int  i>
 <int 9>
 <int 8>
-<int 8>
+<int 7>
 <int 6>
 <int 5>
 <int 4>
