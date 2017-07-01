@@ -1,0 +1,983 @@
+diff -ur gcc-7.1.0/gcc/c-family/c-common.c gcc-7.1.0s/gcc/c-family/c-common.c
+--- gcc-7.1.0/gcc/c-family/c-common.c	2017-04-27 16:47:54.000000000 +0300
++++ gcc-7.1.0s/gcc/c-family/c-common.c	2017-06-30 12:52:16.304619200 +0300
+@@ -525,6 +525,9 @@
+   { "concept",		RID_CONCEPT,	D_CXX_CONCEPTS_FLAGS | D_CXXWARN },
+   { "requires", 	RID_REQUIRES,	D_CXX_CONCEPTS_FLAGS | D_CXXWARN },
+ 
++  /* Static Print extension related keywords */
++  { "static_print", RID_STATIC_PRINT, D_CXXONLY | D_CXXWARN },
++  
+   /* These Objective-C keywords are recognized only immediately after
+      an '@'.  */
+   { "compatibility_alias", RID_AT_ALIAS,	D_OBJC },
+diff -ur gcc-7.1.0/gcc/c-family/c-common.h gcc-7.1.0s/gcc/c-family/c-common.h
+--- gcc-7.1.0/gcc/c-family/c-common.h	2017-03-31 09:40:39.000000000 +0300
++++ gcc-7.1.0s/gcc/c-family/c-common.h	2017-06-30 12:52:06.555414000 +0300
+@@ -178,6 +178,9 @@
+ 
+   /* C++ concepts */
+   RID_CONCEPT, RID_REQUIRES,
++  
++  /* Static Print extension */
++  RID_STATIC_PRINT,
+ 
+   /* C++ transactional memory.  */
+   RID_ATOMIC_NOEXCEPT, RID_ATOMIC_CANCEL, RID_SYNCHRONIZED,
+diff -ur gcc-7.1.0/gcc/cp/constexpr.c gcc-7.1.0s/gcc/cp/constexpr.c
+--- gcc-7.1.0/gcc/cp/constexpr.c	2017-04-12 00:07:32.000000000 +0300
++++ gcc-7.1.0s/gcc/cp/constexpr.c	2017-07-02 01:14:51.641037100 +0300
+@@ -28,6 +28,8 @@
+ #include "c-family/c-objc.h"
+ #include "tree-iterator.h"
+ #include "gimplify.h"
++#include "cxx-pretty-print.h"
++#include "tree-pretty-print.h"
+ #include "builtins.h"
+ #include "tree-inline.h"
+ #include "ubsan.h"
+@@ -39,7 +41,8 @@
+   if (verify_constant ((X), ctx->quiet, non_constant_p, overflow_p)) \
+     return t;								\
+  } while (0)
+-
++extern void dump_template_argument (cxx_pretty_printer *, tree, int);
++         
+ /* Returns true iff FUN is an instantiation of a constexpr function
+    template or a defaulted constexpr function.  */
+ 
+@@ -446,6 +449,7 @@
+ 
+     case USING_STMT:
+     case STATIC_ASSERT:
++    case STATIC_PRINT:
+       return true;
+ 
+     default:
+@@ -969,7 +973,7 @@
+ static GTY (()) hash_table<constexpr_call_hasher> *constexpr_call_table;
+ 
+ static tree cxx_eval_constant_expression (const constexpr_ctx *, tree,
+-					  bool, bool *, bool *, tree * = NULL);
++					  bool, bool *, bool *, tree * = NULL, bool silent_fail = false);
+ 
+ /* Compute a hash value for a constexpr call representation.  */
+ 
+@@ -1395,7 +1399,6 @@
+ /* Subroutine of cxx_eval_constant_expression.
+    Evaluate the call expression tree T in the context of OLD_CALL expression
+    evaluation.  */
+-
+ static tree
+ cxx_eval_call_expression (const constexpr_ctx *ctx, tree t,
+ 			  bool lval,
+@@ -1597,13 +1600,13 @@
+       else
+ 	{
+ 	  tree body, parms, res;
+-
++          hash_map<tree, tree> saved;
+ 	  /* Reuse or create a new unshared copy of this function's body.  */
+ 	  tree copy = get_fundef_copy (fun);
+ 	  body = TREE_PURPOSE (copy);
+ 	  parms = TREE_VALUE (copy);
+ 	  res = TREE_TYPE (copy);
+-
++                
+ 	  /* Associate the bindings with the remapped parms.  */
+ 	  tree bound = new_call.bindings;
+ 	  tree remapped = parms;
+@@ -1614,7 +1617,15 @@
+ 	      gcc_assert (DECL_NAME (remapped) == DECL_NAME (oparm));
+ 	      /* Don't share a CONSTRUCTOR that might be changed.  */
+ 	      arg = unshare_constructor (arg);
+-	      ctx->values->put (remapped, arg);
++              for (hash_map<tree,tree>::iterator x = ctx->values->begin(); x != ctx->values->end(); ++x)
++                {
++                  if (DECL_NAME (remapped) == DECL_NAME ((*x).first)) 
++                    {
++                      saved.put((*x).first, (*x).second);
++                      ctx->values->put((*x).first, arg);
++                    }
++                }	      
++              ctx->values->put (remapped, arg);
+ 	      bound = TREE_CHAIN (bound);
+ 	      remapped = DECL_CHAIN (remapped);
+ 	    }
+@@ -1637,12 +1648,15 @@
+ 	  hash_set<tree> save_exprs;
+ 	  ctx_with_save_exprs.save_exprs = &save_exprs;
+ 	  ctx_with_save_exprs.call = &new_call;
+-
+ 	  tree jump_target = NULL_TREE;
+ 	  cxx_eval_constant_expression (&ctx_with_save_exprs, body,
+ 					lval, non_constant_p, overflow_p,
+ 					&jump_target);
+ 
++          for (hash_map<tree,tree>::iterator x = saved.begin(); x != saved.end(); ++x)
++            {
++              ctx->values->put((*x).first, (*x).second);
++            }	    
+ 	  if (DECL_CONSTRUCTOR_P (fun))
+ 	    /* This can be null for a subobject constructor call, in
+ 	       which case what we care about is the initialization
+@@ -3872,11 +3886,11 @@
+ cxx_eval_constant_expression (const constexpr_ctx *ctx, tree t,
+ 			      bool lval,
+ 			      bool *non_constant_p, bool *overflow_p,
+-			      tree *jump_target)
++			      tree *jump_target, bool silent_fail)
+ {
+   constexpr_ctx new_ctx;
+   tree r = t;
+-
++  
+   if (jump_target && *jump_target)
+     {
+       /* If we are jumping, ignore all statements/expressions except those
+@@ -3973,6 +3987,42 @@
+ 	}
+       break;
+ 
++    case STATIC_PRINT: {
++      tree arguments = STATIC_PRINT_ARGUMENTS(t);
++      
++      cxx_pretty_printer *pp = XNEW (cxx_pretty_printer);
++      new (pp) cxx_pretty_printer ();
++      pp->buffer->stream = stdout;
++      
++      for (int i = 0; i < TREE_VEC_LENGTH(arguments); ++i) 
++        {
++            if (TREE_CODE(TREE_VEC_ELT(arguments, i)) == STRING_CST) {
++                pp_printf(pp, "%s", TREE_STRING_POINTER(TREE_VEC_ELT(arguments, i)));
++            } else {
++                bool temp_non_constant = false;
++                bool temp_overflow = false;
++                tree inst = cxx_eval_constant_expression(ctx, TREE_VEC_ELT(arguments, i), 
++                                                        /*lvalue=*/false, &temp_non_constant, 
++                                                        &temp_overflow, /*jump_target=*/jump_target, 
++                                                        /*silent_fail=*/true);
++                if (inst == error_mark_node)
++                  {
++                    dump_template_argument(pp, TREE_VEC_ELT(arguments, i), 0);
++                  }
++                else
++                  {
++                    
++                    dump_template_argument(pp, inst, 0);
++                  }
++            }
++        }
++        
++      pp_newline_and_flush (pp);          
++      pp->~pretty_printer ();
++      XDELETE (pp);
++      
++      break;
++    }
+     case FUNCTION_DECL:
+     case TEMPLATE_DECL:
+     case LABEL_DECL:
+@@ -4578,9 +4628,15 @@
+ 	    error_at (EXPR_LOCATION (t),
+ 		      "statement is not a constant expression");
+ 	}
+-      else
++      else if (!silent_fail) 
++        {
+ 	internal_error ("unexpected expression %qE of kind %s", t,
+ 			get_tree_code_name (TREE_CODE (t)));
++        } 
++      else 
++        {
++           r = error_mark_node;
++        }
+       *non_constant_p = true;
+       break;
+     }
+@@ -5069,6 +5125,7 @@
+     case CONTINUE_STMT:
+     case REQUIRES_EXPR:
+     case STATIC_ASSERT:
++    case STATIC_PRINT:
+       return true;
+ 
+     case AGGR_INIT_EXPR:
+@@ -5776,8 +5833,8 @@
+       if (objc_is_property_ref (t))
+ 	return false;
+ 
+-      sorry ("unexpected AST of kind %s", get_tree_code_name (TREE_CODE (t)));
+-      gcc_unreachable ();
++      // sorry ("unexpected AST of kind %s", get_tree_code_name (TREE_CODE (t)));
++      // gcc_unreachable ();
+       return false;
+     }
+ #undef RECUR
+diff -ur gcc-7.1.0/gcc/cp/cp-objcp-common.c gcc-7.1.0s/gcc/cp/cp-objcp-common.c
+--- gcc-7.1.0/gcc/cp/cp-objcp-common.c	2017-01-01 14:07:43.000000000 +0200
++++ gcc-7.1.0s/gcc/cp/cp-objcp-common.c	2017-06-30 14:27:06.107298400 +0300
+@@ -70,6 +70,7 @@
+     case DEFERRED_NOEXCEPT:	return sizeof (struct tree_deferred_noexcept);
+     case OVERLOAD:		return sizeof (struct tree_overload);
+     case STATIC_ASSERT:         return sizeof (struct tree_static_assert);
++    case STATIC_PRINT:          return sizeof (struct tree_static_print);
+     case TYPE_ARGUMENT_PACK:
+     case TYPE_PACK_EXPANSION:
+       return sizeof (struct tree_common);
+diff -ur gcc-7.1.0/gcc/cp/cp-tree.def gcc-7.1.0s/gcc/cp/cp-tree.def
+--- gcc-7.1.0/gcc/cp/cp-tree.def	2017-01-26 21:39:40.000000000 +0200
++++ gcc-7.1.0s/gcc/cp/cp-tree.def	2017-06-30 14:28:36.416970800 +0300
+@@ -368,6 +368,10 @@
+    literal) to be displayed if the condition fails to hold.  */
+ DEFTREECODE (STATIC_ASSERT, "static_assert", tcc_exceptional, 0)
+ 
++/* A static print.  This is a Static Print extension.
++   STATIC_PRINT_ARGUMENTS contains the arguments to be printed.  */
++DEFTREECODE (STATIC_PRINT, "static_print", tcc_exceptional, 0)
++
+ /* Represents an argument pack of types (or templates). An argument
+    pack stores zero or more arguments that will be used to instantiate
+    a parameter pack. 
+diff -ur gcc-7.1.0/gcc/cp/cp-tree.h gcc-7.1.0s/gcc/cp/cp-tree.h
+--- gcc-7.1.0/gcc/cp/cp-tree.h	2017-04-17 22:39:00.000000000 +0300
++++ gcc-7.1.0s/gcc/cp/cp-tree.h	2017-06-30 14:32:52.799346000 +0300
+@@ -706,6 +706,22 @@
+   location_t location;
+ };
+ 
++/* The message associated with the static assertion.  This must be a
++   string constant, which will be emitted as an error message when the
++   static assert condition is false.  */
++#define STATIC_PRINT_ARGUMENTS(NODE) \
++  (((struct tree_static_print *)STATIC_PRINT_CHECK (NODE))->arguments)
++
++/* Source location information for a static assertion.  */
++#define STATIC_PRINT_SOURCE_LOCATION(NODE) \
++  (((struct tree_static_print *)STATIC_PRINT_CHECK (NODE))->location)
++
++struct GTY (()) tree_static_print {
++  struct tree_common common;
++  tree arguments;
++  location_t location;
++};
++
+ struct GTY (()) tree_argument_pack_select {
+   struct tree_common common;
+   tree argument_pack;
+@@ -1045,6 +1061,7 @@
+   TS_CP_DEFAULT_ARG,
+   TS_CP_DEFERRED_NOEXCEPT,
+   TS_CP_STATIC_ASSERT,
++  TS_CP_STATIC_PRINT,
+   TS_CP_ARGUMENT_PACK_SELECT,
+   TS_CP_TRAIT_EXPR,
+   TS_CP_LAMBDA_EXPR,
+@@ -1069,6 +1086,8 @@
+   struct lang_identifier GTY ((tag ("TS_CP_IDENTIFIER"))) identifier;
+   struct tree_static_assert GTY ((tag ("TS_CP_STATIC_ASSERT"))) 
+     static_assertion;
++  struct tree_static_print GTY ((tag ("TS_CP_STATIC_PRINT"))) 
++    static_print;
+   struct tree_argument_pack_select GTY ((tag ("TS_CP_ARGUMENT_PACK_SELECT")))
+     argument_pack_select;
+   struct tree_trait_expr GTY ((tag ("TS_CP_TRAIT_EXPR")))
+@@ -6554,6 +6573,7 @@
+ extern tree baselink_for_fns                    (tree);
+ extern void finish_static_assert                (tree, tree, location_t,
+                                                  bool);
++extern void finish_static_print                 (tree, location_t, bool);
+ extern tree finish_decltype_type                (tree, bool, tsubst_flags_t);
+ extern tree finish_trait_expr			(enum cp_trait_kind, tree, tree);
+ extern tree build_lambda_expr                   (void);
+diff -ur gcc-7.1.0/gcc/cp/cxx-pretty-print.c gcc-7.1.0s/gcc/cp/cxx-pretty-print.c
+--- gcc-7.1.0/gcc/cp/cxx-pretty-print.c	2017-04-04 19:30:44.000000000 +0300
++++ gcc-7.1.0s/gcc/cp/cxx-pretty-print.c	2017-06-30 15:09:23.979101300 +0300
+@@ -2078,6 +2078,7 @@
+       break;
+ 
+     case STATIC_ASSERT:
++    case STATIC_PRINT:
+       declaration (t);
+       break;
+ 
+@@ -2317,10 +2318,12 @@
+        namespace-alias-definition
+        using-declaration
+        using-directive
+-       static_assert-declaration */
++       static_assert-declaration
++       static_print-declaration */
+ void
+ cxx_pretty_printer::declaration (tree t)
+ {
++  int i;
+   if (TREE_CODE (t) == STATIC_ASSERT)
+     {
+       pp_cxx_ws_string (this, "static_assert");
+@@ -2330,6 +2333,18 @@
+       expression (STATIC_ASSERT_MESSAGE (t));
+       pp_cxx_right_paren (this);
+     }
++  else if (TREE_CODE (t) == STATIC_PRINT)
++    {
++      pp_cxx_ws_string (this, "static_print");
++      pp_cxx_left_paren (this);
++      for (i = 0; i < TREE_VEC_LENGTH(STATIC_PRINT_ARGUMENTS (t)); ++i) {
++        if (i != 0) {
++          pp_cxx_separate_with (this, ',');
++        }
++        expression (TREE_VEC_ELT(STATIC_PRINT_ARGUMENTS (t), i));
++      }
++      pp_cxx_right_paren (this);
++    }
+   else if (!DECL_LANG_SPECIFIC (t))
+     pp_cxx_simple_declaration (this, t);
+   else if (DECL_USE_TEMPLATE (t))
+diff -ur gcc-7.1.0/gcc/cp/decl.c gcc-7.1.0s/gcc/cp/decl.c
+--- gcc-7.1.0/gcc/cp/decl.c	2017-04-15 06:28:31.000000000 +0300
++++ gcc-7.1.0s/gcc/cp/decl.c	2017-06-30 14:43:31.025966600 +0300
+@@ -16114,6 +16114,7 @@
+     case BASELINK:		return TS_CP_BASELINK;
+     case TEMPLATE_DECL:		return TS_CP_TEMPLATE_DECL;
+     case STATIC_ASSERT:		return TS_CP_STATIC_ASSERT;
++    case STATIC_PRINT:		return TS_CP_STATIC_PRINT;
+     case ARGUMENT_PACK_SELECT:  return TS_CP_ARGUMENT_PACK_SELECT;
+     case TRAIT_EXPR:		return TS_CP_TRAIT_EXPR;
+     case LAMBDA_EXPR:		return TS_CP_LAMBDA_EXPR;
+diff -ur gcc-7.1.0/gcc/cp/error.c gcc-7.1.0s/gcc/cp/error.c
+--- gcc-7.1.0/gcc/cp/error.c	2017-04-18 12:38:55.000000000 +0300
++++ gcc-7.1.0s/gcc/cp/error.c	2017-06-30 19:08:11.771699500 +0300
+@@ -80,7 +80,7 @@
+ static void dump_parameters (cxx_pretty_printer *, tree, int);
+ static void dump_ref_qualifier (cxx_pretty_printer *, tree, int);
+ static void dump_exception_spec (cxx_pretty_printer *, tree, int);
+-static void dump_template_argument (cxx_pretty_printer *, tree, int);
++void dump_template_argument (cxx_pretty_printer *, tree, int);
+ static void dump_template_argument_list (cxx_pretty_printer *, tree, int);
+ static void dump_template_parameter (cxx_pretty_printer *, tree, int);
+ static void dump_template_bindings (cxx_pretty_printer *, tree, tree,
+@@ -157,7 +157,7 @@
+ 
+ /* Dump the template ARGument under control of FLAGS.  */
+ 
+-static void
++void
+ dump_template_argument (cxx_pretty_printer *pp, tree arg, int flags)
+ {
+   if (ARGUMENT_PACK_P (arg))
+@@ -1285,6 +1285,7 @@
+       }
+       break;
+ 
++    case STATIC_PRINT:
+     case STATIC_ASSERT:
+       pp->declaration (t);
+       break;
+diff -ur gcc-7.1.0/gcc/cp/parser.c gcc-7.1.0s/gcc/cp/parser.c
+--- gcc-7.1.0/gcc/cp/parser.c	2017-04-18 12:38:55.000000000 +0300
++++ gcc-7.1.0s/gcc/cp/parser.c	2017-07-01 12:12:49.136472700 +0300
+@@ -157,6 +157,7 @@
+   RT_WHILE, /* while */
+   RT_EXTERN, /* extern */
+   RT_STATIC_ASSERT, /* static_assert */
++  RT_STATIC_PRINT, /* static_print */
+   RT_DECLTYPE, /* decltype */
+   RT_OPERATOR, /* operator */
+   RT_CLASS, /* class */
+@@ -2198,6 +2199,12 @@
+   (cp_parser *);
+ static void cp_parser_static_assert
+   (cp_parser *, bool);
++static tree cp_parser_static_print_argument
++  (cp_parser *);
++static tree cp_parser_static_print_argument_list
++  (cp_parser *);
++static void cp_parser_static_print
++  (cp_parser *, bool);
+ static tree cp_parser_decltype
+   (cp_parser *);
+ static tree cp_parser_decomposition_declaration
+@@ -2340,7 +2347,7 @@
+ static tree cp_parser_template_argument_list
+   (cp_parser *);
+ static tree cp_parser_template_argument
+-  (cp_parser *);
++  (cp_parser *, bool is_static_print=false);
+ static void cp_parser_explicit_instantiation
+   (cp_parser *);
+ static void cp_parser_explicit_specialization
+@@ -2492,7 +2499,7 @@
+ /* Utility Routines */
+ 
+ static cp_expr cp_parser_lookup_name
+-  (cp_parser *, tree, enum tag_types, bool, bool, bool, tree *, location_t);
++  (cp_parser *, tree, enum tag_types, bool, bool, bool, tree *, location_t, bool is_static_print=false);
+ static tree cp_parser_lookup_name_simple
+   (cp_parser *, tree, location_t);
+ static tree cp_parser_maybe_treat_template_as_class
+@@ -2561,7 +2568,7 @@
+ static bool cp_parser_next_token_starts_class_definition_p
+   (cp_parser *);
+ static bool cp_parser_next_token_ends_template_argument_p
+-  (cp_parser *);
++  (cp_parser *, bool is_static_print=false);
+ static bool cp_parser_nth_token_starts_template_argument_list_p
+   (cp_parser *, size_t);
+ static enum tag_types cp_parser_token_is_class_key
+@@ -12521,6 +12528,11 @@
+ 
+    block-declaration:
+      static_assert-declaration
++     
++   Static Print Extension:
++   
++   block-declaration:
++     static_print-declaration
+ 
+    If STATEMENT_P is TRUE, then this block-declaration is occurring as
+    part of a declaration-statement.  */
+@@ -12597,6 +12609,9 @@
+   /* If the next token is `static_assert' we have a static assertion.  */
+   else if (token1->keyword == RID_STATIC_ASSERT)
+     cp_parser_static_assert (parser, /*member_p=*/false);
++  /* If the next token is `static_print' we have a static print statement. */
++  else if (token1->keyword == RID_STATIC_PRINT)
++    cp_parser_static_print (parser, /*member_p=*/false);
+   /* Anything else must be a simple-declaration.  */
+   else
+     cp_parser_simple_declaration (parser, !statement_p,
+@@ -13628,6 +13643,155 @@
+   finish_static_assert (condition, message, saved_loc, member_p);
+ }
+ 
++/* Parse a static-print-argument.
++
++   static-print-argument:
++     string-literal
++     template-argument */
++
++static tree
++cp_parser_static_print_argument (cp_parser* parser)
++{
++  tree message;
++        
++  cp_parser_parse_tentatively (parser);
++  
++  /* Parse the string-literal message.  */
++  message = cp_parser_string_literal (parser, 
++                            	      /*translate=*/false,
++                            	      /*wide_ok=*/true);
++  
++  if (cp_parser_parse_definitely (parser))
++        return message;
++
++  return cp_parser_template_argument (parser, /*is_static_print=*/true);
++}
++
++/* Parse a static-print-argument-list.
++
++   static-print-argument-list:
++     static_print-argument
++     static_print-argument-list , static-print-argument
++     
++   Returns a TREE_VEC containing the arguments.  */
++
++static tree
++cp_parser_static_print_argument_list (cp_parser* parser)
++{
++  tree fixed_args[10];
++  unsigned n_args = 0;
++  unsigned alloced = 10;
++  tree *arg_ary = fixed_args;
++  tree vec;
++  bool saved_in_template_argument_list_p;
++  bool saved_ice_p;
++  bool saved_non_ice_p;
++
++  saved_in_template_argument_list_p = parser->in_template_argument_list_p;
++  parser->in_template_argument_list_p = true;
++  /* Even if the template-id appears in an integral
++     constant-expression, the contents of the argument list do
++     not.  */
++  saved_ice_p = parser->integral_constant_expression_p;
++  parser->integral_constant_expression_p = false;
++  saved_non_ice_p = parser->non_integral_constant_expression_p;
++  parser->non_integral_constant_expression_p = false;
++
++  /* Parse the arguments.  */
++  do
++    {
++      tree argument;
++
++      if (n_args)
++	/* Consume the comma.  */
++	cp_lexer_consume_token (parser->lexer);
++
++      /* Parse the template-argument.  */
++      argument = cp_parser_static_print_argument (parser);
++
++      if (n_args == alloced)
++	{
++	  alloced *= 2;
++
++	  if (arg_ary == fixed_args)
++	    {
++	      arg_ary = XNEWVEC (tree, alloced);
++	      memcpy (arg_ary, fixed_args, sizeof (tree) * n_args);
++	    }
++	  else
++	    arg_ary = XRESIZEVEC (tree, arg_ary, alloced);
++	}
++      arg_ary[n_args++] = argument;
++    }
++  while (cp_lexer_next_token_is (parser->lexer, CPP_COMMA));
++
++  vec = make_tree_vec (n_args);
++
++  while (n_args--)
++    TREE_VEC_ELT (vec, n_args) = arg_ary[n_args];
++
++  if (arg_ary != fixed_args)
++    free (arg_ary);
++  parser->non_integral_constant_expression_p = saved_non_ice_p;
++  parser->integral_constant_expression_p = saved_ice_p;
++  parser->in_template_argument_list_p = saved_in_template_argument_list_p;
++  return vec;
++}
++
++
++/* Parse a static_print-declaration.
++
++   static_print-declaration:
++     static_print ( static-print-argument-seq ) ;
++
++   If MEMBER_P, this static_print is a class member.  */
++
++static void 
++cp_parser_static_print(cp_parser *parser, bool member_p)
++{
++  tree arguments;
++  cp_token *token;
++  location_t saved_loc;
++
++  /* Peek at the `static_print' token so we can keep track of exactly
++     where the static assertion started.  */
++  token = cp_lexer_peek_token (parser->lexer);
++  saved_loc = token->location;
++
++  /* Look for the `static_print' keyword.  */
++  if (!cp_parser_require_keyword (parser, RID_STATIC_PRINT, 
++                                  RT_STATIC_PRINT))
++    return;
++
++  /*  We know we are in a static print; commit to any tentative
++      parse.  */
++  if (cp_parser_parsing_tentatively (parser))
++    cp_parser_commit_to_tentative_parse (parser);
++
++  /* Parse the `(' starting the static print argument list.  */
++  cp_parser_require (parser, CPP_OPEN_PAREN, RT_OPEN_PAREN);
++
++  /* Parse the constant-expression.  Allow a non-constant expression
++     here in order to give better diagnostics in finish_static_assert.  */
++  arguments = 
++    cp_parser_static_print_argument_list (parser);
++    
++  /* A `)' completes the static print.  */
++  if (!cp_parser_require (parser, CPP_CLOSE_PAREN, RT_CLOSE_PAREN))
++    cp_parser_skip_to_closing_parenthesis (parser, 
++                                         /*recovering=*/true, 
++                                         /*or_comma=*/false,
++                                         /*consume_paren=*/true);
++
++  /* A semicolon terminates the declaration.  */
++  cp_parser_require (parser, CPP_SEMICOLON, RT_SEMICOLON);
++
++  /* Complete the static print, which may mean either processing 
++     the static print now or saving it for template instantiation.  */
++  if (!in_discarded_stmt)
++        finish_static_print (arguments, saved_loc, member_p);
++}
++
+ /* Parse the expression in decltype ( expression ).  */
+ 
+ static tree
+@@ -15883,7 +16047,7 @@
+    Therefore, we use "conditional-expression" instead.  */
+ 
+ static tree
+-cp_parser_template_argument (cp_parser* parser)
++cp_parser_template_argument (cp_parser* parser, bool is_static_print)
+ {
+   tree argument;
+   bool template_p;
+@@ -15905,6 +16069,7 @@
+      Therefore, we try a type-id first.  */
+   cp_parser_parse_tentatively (parser);
+   argument = cp_parser_template_type_arg (parser);
++  
+   /* If there was no error parsing the type-id but the next token is a
+      '>>', our behavior depends on which dialect of C++ we're
+      parsing. In C++98, we probably found a typo for '> >'. But there
+@@ -15933,7 +16098,7 @@
+       /* If the next token isn't a `,' or a `>', then this argument wasn't
+       really finished. This means that the argument is not a valid
+       type-id.  */
+-      if (!cp_parser_next_token_ends_template_argument_p (parser))
++      if (!cp_parser_next_token_ends_template_argument_p (parser, is_static_print))
+ 	cp_parser_error (parser, "expected template-argument");
+       /* If that worked, we're done.  */
+       if (cp_parser_parse_definitely (parser))
+@@ -15951,8 +16116,9 @@
+ 				      /*optional_p=*/false);
+   /* If the next token isn't a `,' or a `>', then this argument wasn't
+      really finished.  */
+-  if (!cp_parser_next_token_ends_template_argument_p (parser))
++  if (!cp_parser_next_token_ends_template_argument_p (parser, is_static_print))
+     cp_parser_error (parser, "expected template-argument");
++  
+   if (!cp_parser_error_occurred (parser))
+     {
+       /* Figure out what is being referred to.  If the id-expression
+@@ -15966,7 +16132,8 @@
+ 					  /*is_namespace=*/false,
+ 					  /*check_dependency=*/true,
+ 					  /*ambiguous_decls=*/NULL,
+-					  argument_start_token->location);
++					  argument_start_token->location,
++                                          is_static_print);
+       /* Handle a constrained-type-specifier for a non-type template
+ 	 parameter.  */
+       if (tree decl = cp_parser_maybe_concept_name (parser, argument))
+@@ -15985,7 +16152,7 @@
+      allowed.  */
+   if (cxx_dialect > cxx14)
+     goto general_expr;
+-
++  
+   /* Otherwise, the permitted cases are given in [temp.arg.nontype]:
+ 
+      -- an integral constant-expression of integral or enumeration
+@@ -16008,7 +16175,7 @@
+ 					       /*template_arg_p=*/true,
+ 					       &idk);
+       if (TREE_CODE (argument) != TEMPLATE_PARM_INDEX
+-	  || !cp_parser_next_token_ends_template_argument_p (parser))
++	  || !cp_parser_next_token_ends_template_argument_p (parser, is_static_print))
+ 	cp_parser_simulate_error (parser);
+       if (cp_parser_parse_definitely (parser))
+ 	return argument;
+@@ -16037,12 +16204,12 @@
+ 					       /*template_arg_p=*/true,
+ 					       &idk);
+       if (cp_parser_error_occurred (parser)
+-	  || !cp_parser_next_token_ends_template_argument_p (parser))
++	  || !cp_parser_next_token_ends_template_argument_p (parser, is_static_print))
+ 	cp_parser_abort_tentative_parse (parser);
+       else
+ 	{
+ 	  tree probe;
+-
++                
+ 	  if (INDIRECT_REF_P (argument))
+ 	    {
+ 	      /* Strip the dereference temporarily.  */
+@@ -16106,9 +16273,9 @@
+   if (maybe_type_id)
+     cp_parser_parse_tentatively (parser);
+ 
+-  if (cxx_dialect <= cxx14)
++  if (cxx_dialect <= cxx14) {
+     argument = cp_parser_constant_expression (parser);
+-  else
++  } else
+     {
+       /* With C++17 generalized non-type template arguments we need to handle
+ 	 lvalue constant expressions, too.  */
+@@ -16118,10 +16285,13 @@
+ 
+   if (!maybe_type_id)
+     return argument;
+-  if (!cp_parser_next_token_ends_template_argument_p (parser))
++
++  if (!cp_parser_next_token_ends_template_argument_p (parser, is_static_print))
+     cp_parser_error (parser, "expected template-argument");
++  
+   if (cp_parser_parse_definitely (parser))
+     return argument;
++
+   /* We did our best to parse the argument as a non type-id, but that
+      was the only alternative that matched (albeit with a '>' after
+      it). We can assume it's just a typo from the user, and a
+@@ -20622,7 +20792,7 @@
+ {
+   cp_decl_specifier_seq type_specifier_seq;
+   cp_declarator *abstract_declarator;
+-
++  
+   /* Parse the type-specifier-seq.  */
+   cp_parser_type_specifier_seq (parser, /*is_declaration=*/false,
+ 				is_trailing_return,
+@@ -20776,7 +20946,6 @@
+          for error reporting purposes*/
+      if (!start_token)
+        start_token = cp_lexer_peek_token (parser->lexer);
+-
+       /* Look for the type-specifier.  */
+       type_specifier = cp_parser_type_specifier (parser,
+ 						 flags,
+@@ -22979,7 +23148,13 @@
+    C++0x Extensions:
+ 
+    member-declaration:
+-     static_assert-declaration  */
++     static_assert-declaration  
++     
++   Static Print Extension:
++   
++   member-declaration:
++     static_print-declaration
++*/
+ 
+ static void
+ cp_parser_member_declaration (cp_parser* parser)
+@@ -23080,6 +23255,13 @@
+       return;
+     }
+ 
++  /* If the next token is `static_print' we have a static print statement.  */
++  if (cp_lexer_next_token_is_keyword (parser->lexer, RID_STATIC_PRINT))
++    {
++      cp_parser_static_print (parser, /*member_p=*/true);
++      return;
++    }
++
+   parser->colon_corrects_to_scope_p = false;
+ 
+   if (cp_parser_using_declaration (parser, /*access_declaration=*/true))
+@@ -25478,7 +25660,8 @@
+ 		       bool is_namespace,
+ 		       bool check_dependency,
+ 		       tree *ambiguous_decls,
+-		       location_t name_location)
++		       location_t name_location,
++                       bool is_static_print)
+ {
+   tree decl;
+   tree object_type = parser->context->object_type;
+@@ -25623,7 +25806,7 @@
+ 		decl = TYPE_NAME (type);
+ 	    }
+ 	  else if (is_template
+-		   && (cp_parser_next_token_ends_template_argument_p (parser)
++		   && (cp_parser_next_token_ends_template_argument_p (parser, is_static_print)
+ 		       || cp_lexer_next_token_is (parser->lexer,
+ 						  CPP_CLOSE_PAREN)))
+ 	    decl = make_unbound_class_template (parser->scope,
+@@ -27750,6 +27933,9 @@
+       case RT_STATIC_ASSERT:
+ 	cp_parser_error (parser, "expected %<static_assert%>");
+ 	return;
++      case RT_STATIC_PRINT:
++	cp_parser_error (parser, "expected %<static_print%>");
++	return;
+       case RT_DECLTYPE:
+ 	cp_parser_error (parser, "expected %<decltype%>");
+ 	return;
+@@ -28055,13 +28241,13 @@
+    C++0x) ending a template-argument.  */
+ 
+ static bool
+-cp_parser_next_token_ends_template_argument_p (cp_parser *parser)
++cp_parser_next_token_ends_template_argument_p (cp_parser *parser, bool is_static_print)
+ {
+   cp_token *token;
+ 
+   token = cp_lexer_peek_token (parser->lexer);
+   return (token->type == CPP_COMMA 
+-          || token->type == CPP_GREATER
++          || token->type == (is_static_print ? CPP_CLOSE_PAREN : CPP_GREATER)
+           || token->type == CPP_ELLIPSIS
+ 	  || ((cxx_dialect != cxx98) && token->type == CPP_RSHIFT));
+ }
+diff -ur gcc-7.1.0/gcc/cp/pt.c gcc-7.1.0s/gcc/cp/pt.c
+--- gcc-7.1.0/gcc/cp/pt.c	2017-04-17 22:24:31.000000000 +0300
++++ gcc-7.1.0s/gcc/cp/pt.c	2017-06-30 17:17:40.220227800 +0300
+@@ -10497,6 +10497,26 @@
+                                         STATIC_ASSERT_SOURCE_LOCATION (t),
+                                         /*member_p=*/true);
+                 }
++              else if (TREE_CODE (t) == STATIC_PRINT)
++                {
++                  tree subst;
++                  int idx;
++ 
++                  subst = make_tree_vec(TREE_VEC_LENGTH(STATIC_PRINT_ARGUMENTS (t)));
++ 
++		  ++c_inhibit_evaluation_warnings;
++                  for (idx = 0; idx < TREE_VEC_LENGTH(STATIC_PRINT_ARGUMENTS (t)); ++idx) {
++                      TREE_VEC_ELT(subst, idx) =
++                            tsubst_expr (TREE_VEC_ELT(STATIC_PRINT_ARGUMENTS (t), idx), args, 
++                                         tf_warning_or_error, NULL_TREE,
++                                         /*integral_constant_expression_p=*/true);
++                  }
++		  --c_inhibit_evaluation_warnings;
++
++                  finish_static_print (subst,
++                                        STATIC_PRINT_SOURCE_LOCATION (t),
++                                        /*member_p=*/true);
++                }
+ 	      else if (TREE_CODE (t) != CONST_DECL)
+ 		{
+ 		  tree r;
+@@ -16112,6 +16132,28 @@
+       }
+       break;
+ 
++    case STATIC_PRINT:
++      {
++        tree subst;
++        int idx;
++
++        subst = make_tree_vec(TREE_VEC_LENGTH(STATIC_PRINT_ARGUMENTS (t)));
++
++        ++c_inhibit_evaluation_warnings;
++        for (idx = 0; idx < TREE_VEC_LENGTH(STATIC_PRINT_ARGUMENTS (t)); ++idx) {
++            TREE_VEC_ELT(subst, idx) =
++                  tsubst_expr (TREE_VEC_ELT(STATIC_PRINT_ARGUMENTS (t), idx), args, 
++                               complain, in_decl,
++                               /*integral_constant_expression_p=*/true);
++        }
++        --c_inhibit_evaluation_warnings;
++
++        finish_static_print (subst,
++                              STATIC_PRINT_SOURCE_LOCATION (t),
++                              /*member_p=*/true);
++      }
++      break;
++
+     case OACC_KERNELS:
+     case OACC_PARALLEL:
+       tmp = tsubst_omp_clauses (OMP_CLAUSES (t), C_ORT_ACC, args, complain,
+diff -ur gcc-7.1.0/gcc/cp/semantics.c gcc-7.1.0s/gcc/cp/semantics.c
+--- gcc-7.1.0/gcc/cp/semantics.c	2017-04-04 18:25:21.000000000 +0300
++++ gcc-7.1.0s/gcc/cp/semantics.c	2017-07-01 13:48:25.787907000 +0300
+@@ -37,6 +37,8 @@
+ #include "c-family/c-objc.h"
+ #include "tree-inline.h"
+ #include "intl.h"
++#include "cxx-pretty-print.h"
++#include "tree-pretty-print.h"
+ #include "tree-iterator.h"
+ #include "omp-general.h"
+ #include "convert.h"
+@@ -8837,6 +8839,82 @@
+     }
+ }
+ 
++extern void dump_template_argument (cxx_pretty_printer *, tree, int);
++
++/* Build a STATIC_PRINT for a static print statement with the arguments
++   ARGUMENTS.  LOCATION is the location of the static print statement in 
++   the source code.  When MEMBER_P, this static print is a member of a 
++   class.  */
++void 
++finish_static_print (tree arguments, location_t location, bool member_p)
++{
++  int i;
++  if (arguments == NULL_TREE
++      || arguments == error_mark_node)
++    return;
++
++  if (check_for_bare_parameter_packs (arguments))
++    arguments = error_mark_node;
++
++  tree static_print;
++  
++  static_print = make_node (STATIC_PRINT);
++  STATIC_PRINT_ARGUMENTS (static_print) = arguments;
++  STATIC_PRINT_SOURCE_LOCATION (static_print) = location;
++  
++  if (!member_p)
++    add_stmt (static_print);          
++
++  for (i = 0; i < TREE_VEC_LENGTH(arguments); ++i) 
++    {
++        if (type_dependent_expression_p (TREE_VEC_ELT(arguments, i)) 
++            || value_dependent_expression_p (TREE_VEC_ELT(arguments, i)))
++        {
++        /* We're in a template; build a STATIC_PRINT and put it in
++                the right place. */
++        if (member_p)
++            maybe_add_class_template_decl_list (current_class_type, 
++                                                  static_print,
++                                                  /*friend_p=*/0);
++        return;
++        }
++    }
++  
++  
++  cxx_pretty_printer *pp = XNEW (cxx_pretty_printer);
++  new (pp) cxx_pretty_printer ();
++  pp->buffer->stream = stdout;
++  
++  for (i = 0; i < TREE_VEC_LENGTH(arguments); ++i) 
++    {
++        if (TREE_CODE(TREE_VEC_ELT(arguments, i)) == STRING_CST) {
++            pp_printf(pp, "%s", TREE_STRING_POINTER(TREE_VEC_ELT(arguments, i)));
++        } else {
++            tree inst;   
++            inst = instantiate_non_dependent_expr_sfinae (TREE_VEC_ELT(arguments, i), tf_none);
++            
++            if (type_unknown_p (inst)
++                || TREE_OVERFLOW_P (inst))
++              {
++                dump_template_argument(pp, TREE_VEC_ELT(arguments, i), 0);
++              }
++            else
++              {
++                inst = maybe_constant_value (inst);
++                if (TREE_CONSTANT(inst)) {
++                    dump_template_argument(pp, inst, 0);
++                } else {
++                    dump_template_argument(pp, TREE_VEC_ELT(arguments, i), 0);
++                }
++              }
++        }
++    }
++    
++  pp_newline_and_flush (pp);          
++  pp->~pretty_printer ();
++  XDELETE (pp);
++}
++
+ /* Implements the C++0x decltype keyword. Returns the type of EXPR,
+    suitable for use as a type-specifier.
+ 
+diff -ur gcc-7.1.0/gcc/gimplify.c gcc-7.1.0s/gcc/gimplify.c
+--- gcc-7.1.0/gcc/gimplify.c	2017-04-10 11:58:02.000000000 +0300
++++ gcc-7.1.0s/gcc/gimplify.c	2017-07-01 12:46:27.726189800 +0300
+@@ -11497,6 +11497,10 @@
+ 	  ret = gimplify_return_expr (*expr_p, pre_p);
+ 	  break;
+ 
++	case STATIC_PRINT:
++          ret = GS_ALL_DONE;
++          break;
++        
+ 	case CONSTRUCTOR:
+ 	  /* Don't reduce this in place; let gimplify_init_constructor work its
+ 	     magic.  Buf if we're just elaborating this for side effects, just
+diff -ur gcc-7.1.0/libstdc++-v3/include/bits/c++config gcc-7.1.0s/libstdc++-v3/include/bits/c++config
+--- gcc-7.1.0/libstdc++-v3/include/bits/c++config	2017-03-23 21:40:07.000000000 +0200
++++ gcc-7.1.0s/libstdc++-v3/include/bits/c++config	2017-05-31 13:11:20.112911900 +0300
+@@ -30,6 +30,8 @@
+ #ifndef _GLIBCXX_CXX_CONFIG_H
+ #define _GLIBCXX_CXX_CONFIG_H 1
+ 
++#define _GLIBCXX_USE_NANOSLEEP
++
+ // The major release number for the GCC release the C++ library belongs to.
+ #define _GLIBCXX_RELEASE
+ 
