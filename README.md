@@ -32,8 +32,8 @@ constexpr auto fibonacci(unsigned long long int i) {
     if (i <= 1) {
         return 1;
     }
-    static_print("fibonacci(", i, ")");
-    return fibonacci(i - 1) + fibonacci(i - 2);
+    static_print("<", int, " ", i, ">");
+    return fibonacci(i - 1) + fibonacci(i - 2);
 }
 
 int main() {
