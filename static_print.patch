@@ -170,7 +170,7 @@ diff -ur gcc-7.1.0/gcc/cp/constexpr.c gcc-7.1.0s/gcc/cp/constexpr.c
 +        }
 +        
 +      pp_newline_and_flush (pp);          
-+      pp->~pretty_printer ();
++      pp->~cxx_pretty_printer ();
 +      XDELETE (pp);
 +      
 +      break;
@@ -948,7 +948,7 @@ diff -ur gcc-7.1.0/gcc/cp/semantics.c gcc-7.1.0s/gcc/cp/semantics.c
 +    }
 +    
 +  pp_newline_and_flush (pp);          
-+  pp->~pretty_printer ();
++  pp->~cxx_pretty_printer ();
 +  XDELETE (pp);
 +}
 +
