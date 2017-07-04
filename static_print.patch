@@ -278,7 +278,7 @@ diff -ur gcc-7.1.0/gcc/cp/cp-tree.h gcc-7.1.0s/gcc/cp/cp-tree.h
    struct tree_static_assert GTY ((tag ("TS_CP_STATIC_ASSERT"))) 
      static_assertion;
 +  struct tree_static_print GTY ((tag ("TS_CP_STATIC_PRINT"))) 
-+    static_print;
++    static_print_stmt;
    struct tree_argument_pack_select GTY ((tag ("TS_CP_ARGUMENT_PACK_SELECT")))
      argument_pack_select;
    struct tree_trait_expr GTY ((tag ("TS_CP_TRAIT_EXPR")))
@@ -893,14 +893,14 @@ diff -ur gcc-7.1.0/gcc/cp/semantics.c gcc-7.1.0s/gcc/cp/semantics.c
 +  if (check_for_bare_parameter_packs (arguments))
 +    arguments = error_mark_node;
 +
-+  tree static_print;
++  tree static_print_stmt;
 +  
-+  static_print = make_node (STATIC_PRINT);
-+  STATIC_PRINT_ARGUMENTS (static_print) = arguments;
-+  STATIC_PRINT_SOURCE_LOCATION (static_print) = location;
++  static_print_stmt = make_node (STATIC_PRINT);
++  STATIC_PRINT_ARGUMENTS (static_print_stmt) = arguments;
++  STATIC_PRINT_SOURCE_LOCATION (static_print_stmt) = location;
 +  
 +  if (!member_p)
-+    add_stmt (static_print);          
++    add_stmt (static_print_stmt);          
 +
 +  for (i = 0; i < TREE_VEC_LENGTH(arguments); ++i) 
 +    {
@@ -911,7 +911,7 @@ diff -ur gcc-7.1.0/gcc/cp/semantics.c gcc-7.1.0s/gcc/cp/semantics.c
 +                the right place. */
 +        if (member_p)
 +            maybe_add_class_template_decl_list (current_class_type, 
-+                                                  static_print,
++                                                  static_print_stmt,
 +                                                  /*friend_p=*/0);
 +        return;
 +        }
