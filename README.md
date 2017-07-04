@@ -1,5 +1,9 @@
 # static-print
 
+### Changelog
+
+* 4/7/17 - Fixed issue which prevented the compiler from compiling during second stage (bootstrapping).
+
 ## What is it
 This is a patch to the GCC 7.1 source which *adds a "static_print" statement to C++*.
 
