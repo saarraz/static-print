@@ -71,56 +71,6 @@ diff -ur gcc-7.1.0/gcc/cp/constexpr.c gcc-7.1.0s/gcc/cp/constexpr.c
  static tree
  cxx_eval_call_expression (const constexpr_ctx *ctx, tree t,
  			  bool lval,
-@@ -1597,13 +1600,13 @@
-       else
- 	{
- 	  tree body, parms, res;
--
-+          hash_map<tree, tree> saved;
- 	  /* Reuse or create a new unshared copy of this function's body.  */
- 	  tree copy = get_fundef_copy (fun);
- 	  body = TREE_PURPOSE (copy);
- 	  parms = TREE_VALUE (copy);
- 	  res = TREE_TYPE (copy);
--
-+                
- 	  /* Associate the bindings with the remapped parms.  */
- 	  tree bound = new_call.bindings;
- 	  tree remapped = parms;
-@@ -1614,7 +1617,15 @@
- 	      gcc_assert (DECL_NAME (remapped) == DECL_NAME (oparm));
- 	      /* Don't share a CONSTRUCTOR that might be changed.  */
- 	      arg = unshare_constructor (arg);
--	      ctx->values->put (remapped, arg);
-+              for (hash_map<tree,tree>::iterator x = ctx->values->begin(); x != ctx->values->end(); ++x)
-+                {
-+                  if (DECL_NAME (remapped) == DECL_NAME ((*x).first)) 
-+                    {
-+                      saved.put((*x).first, (*x).second);
-+                      ctx->values->put((*x).first, arg);
-+                    }
-+                }	      
-+              ctx->values->put (remapped, arg);
- 	      bound = TREE_CHAIN (bound);
- 	      remapped = DECL_CHAIN (remapped);
- 	    }
-@@ -1637,12 +1648,15 @@
- 	  hash_set<tree> save_exprs;
- 	  ctx_with_save_exprs.save_exprs = &save_exprs;
- 	  ctx_with_save_exprs.call = &new_call;
--
- 	  tree jump_target = NULL_TREE;
- 	  cxx_eval_constant_expression (&ctx_with_save_exprs, body,
- 					lval, non_constant_p, overflow_p,
- 					&jump_target);
- 
-+          for (hash_map<tree,tree>::iterator x = saved.begin(); x != saved.end(); ++x)
-+            {
-+              ctx->values->put((*x).first, (*x).second);
-+            }	    
- 	  if (DECL_CONSTRUCTOR_P (fun))
- 	    /* This can be null for a subobject constructor call, in
- 	       which case what we care about is the initialization
 @@ -3872,11 +3886,11 @@
  cxx_eval_constant_expression (const constexpr_ctx *ctx, tree t,
  			      bool lval,
