@@ -30,32 +30,5 @@ int main() {
 Compiling the above program prints out (at compile time):
 `The template test has been instantiated as  test<int, 3>. By the way, s + 1 is 4`
 
-static_print also works inside constexpr functions!
-```
-constexpr auto fibonacci(unsigned long long int i) {
-    if (i <= 1) {
-        return 1;
-    }
-    static_print("<", int, " ", i, ">");
-    return fibonacci(i - 1) + fibonacci(i - 2);
-}
-
-int main() {
-    constexpr auto x = fibonacci(9);
-    return 0;
-}
-```
-Compiling the above program prints out (at compile time):
-```
-<int  i>
-<int 9>
-<int 8>
-<int 7>
-<int 6>
-<int 5>
-<int 4>
-<int 3>
-<int 2>
-```
 ## How to use
 Download the GCC 7.1 sources, apply the patch and build GCC for your platform of choice
